@@ -86,14 +86,12 @@
         const TEACHER_PASSWORD = "1234";
 
         let peer = null;
+        let hostConn = null;
         let myName = "";
         let currentRoomId = "";
         let isTeacher = false;
+        let isServerHost = false;
         
-        let activeConns = []; 
-        let membersMap = {}; 
-        let finalScoresMap = {};
-
         let round = 1;
         let myScore = 0;
         let oppScore = 0;
@@ -102,83 +100,114 @@
         let isAI = false;
         let aiLastMove = 'cooperate';
 
+        let connectedClients = []; 
+        let finalScores = []; 
+
         function joinRoom() {
             let rawRoom = document.getElementById('room-id').value.trim();
             myName = document.getElementById('user-name').value.trim();
 
             if (!rawRoom || !myName) return alert("입장 코드와 본인 이름을 모두 입력해 주세요.");
 
-            // 영문과 숫자만 추출하여 안전한 방 ID 생성
             currentRoomId = rawRoom.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-            if(!currentRoomId) currentRoomId = "ROOM1";
+            if (!currentRoomId) currentRoomId = "ROOM1";
 
             document.getElementById('display-room-id').innerText = currentRoomId;
             document.getElementById('screen-login').style.display = 'none';
             document.getElementById('screen-lobby').style.display = 'block';
 
-            // 내 고유 Peer ID
-            const myPeerId = "ETHICS-" + currentRoomId + "-" + Math.floor(Math.random() * 100000);
-            
-            peer = new Peer(myPeerId);
+            const roomHostId = "ETHICS-ROOM-V2-" + currentRoomId;
+
+            // 구글 공용 STUN 서버 적용 (학교 및 방화벽 완벽 돌파)
+            const peerConfig = {
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
+            };
+
+            // 첫 접속자 = 방장(Host)으로 등록 시도
+            peer = new Peer(roomHostId, peerConfig);
 
             peer.on('open', (id) => {
-                membersMap[id] = myName;
-                updateCount();
-
-                // 기존 다른 참가자들과 연결 시도 (1번부터 30번 슬롯 탐색)
-                for (let i = 1; i <= 30; i++) {
-                    let targetId = "ETHICS-" + currentRoomId + "-" + i;
-                    if (targetId !== id) {
-                        tryConnect(targetId);
-                    }
-                }
+                isServerHost = true;
+                connectedClients = [{ id: id, name: myName, conn: null }];
+                updateLobbyUI();
             });
 
+            // 누군가 방장에게 접속했을 때
             peer.on('connection', (conn) => {
-                setupConnection(conn);
+                conn.on('open', () => {
+                    // 신규 접속 수신
+                });
+
+                conn.on('data', (data) => {
+                    if (data.type === 'JOIN') {
+                        // 중복 체크 후 리스트 등록
+                        let exists = connectedClients.find(c => c.id === conn.peer);
+                        if (!exists) {
+                            connectedClients.push({ id: conn.peer, name: data.name, conn: conn });
+                        } else {
+                            exists.name = data.name;
+                            exists.conn = conn;
+                        }
+                        broadcastLobbyStatus();
+                    } else if (data.type === 'SUBMIT_SCORE') {
+                        handleScoreSubmit(data.name, data.score);
+                    }
+                });
+
+                conn.on('close', () => {
+                    connectedClients = connectedClients.filter(c => c.id !== conn.peer);
+                    broadcastLobbyStatus();
+                });
             });
-        }
 
-        function tryConnect(targetId) {
-            let conn = peer.connect(targetId, { reliable: true });
-            if (conn) {
-                setupConnection(conn);
-            }
-        }
+            // 이미 방장이 존재할 때 (General Client로 접속)
+            peer.on('error', (err) => {
+                if (err.type === 'unavailable-id') {
+                    isServerHost = false;
+                    // 일반 클라이언트로 무작위 ID 생성하여 방장에게 연결
+                    peer = new Peer(peerConfig);
 
-        function setupConnection(conn) {
-            conn.on('open', () => {
-                if (!activeConns.find(c => c.peer === conn.peer)) {
-                    activeConns.push(conn);
+                    peer.on('open', () => {
+                        hostConn = peer.connect(roomHostId, { reliable: true });
+
+                        hostConn.on('open', () => {
+                            // 방장에게 내 정보 전송
+                            hostConn.send({ type: 'JOIN', name: myName });
+                        });
+
+                        hostConn.on('data', (data) => {
+                            if (data.type === 'LOBBY_STATUS') {
+                                document.getElementById('lobby-count').innerText = data.count;
+                            } else if (data.type === 'START_GAME') {
+                                startMyGame(data.oppAnonName, data.isAI);
+                            } else if (data.type === 'FINAL_RANKINGS') {
+                                renderRankTable(data.rankings);
+                            }
+                        });
+                    });
                 }
-                // 내 정보를 상대에게 알림
-                conn.send({ type: 'INFO', name: myName, peerId: peer.id });
-            });
-
-            conn.on('data', (data) => {
-                if (data.type === 'INFO') {
-                    membersMap[data.peerId] = data.name;
-                    updateCount();
-                } else if (data.type === 'START_GAME') {
-                    startMyGame(data.oppAnonName, data.isAI);
-                } else if (data.type === 'SCORE') {
-                    finalScoresMap[data.name] = data.score;
-                    updateAndBroadcastRankings();
-                } else if (data.type === 'RANKINGS') {
-                    renderRankTable(data.rankings);
-                }
-            });
-
-            conn.on('close', () => {
-                activeConns = activeConns.filter(c => c.peer !== conn.peer);
-                delete membersMap[conn.peer];
-                updateCount();
             });
         }
 
-        function updateCount() {
-            let count = Object.keys(membersMap).length;
-            document.getElementById('lobby-count').innerText = count;
+        function broadcastLobbyStatus() {
+            if (!isServerHost) return;
+            let count = connectedClients.length;
+            updateLobbyUI();
+
+            connectedClients.forEach(client => {
+                if (client.conn && client.conn.open) {
+                    client.conn.send({ type: 'LOBBY_STATUS', count: count });
+                }
+            });
+        }
+
+        function updateLobbyUI() {
+            document.getElementById('lobby-count').innerText = connectedClients.length;
         }
 
         function authTeacher() {
@@ -187,7 +216,7 @@
                 isTeacher = true;
                 document.getElementById('teacher-login-box').style.display = 'none';
                 document.getElementById('host-controls').style.display = 'block';
-                alert("교사 인증 완료! 인원이 모두 들어오면 시작을 누르세요.");
+                alert("교사 인증 완료! 인원이 모두 모이면 아래 [게임 시작] 버튼을 누르세요.");
             } else if (inputPw !== null) {
                 alert("비밀번호가 올바르지 않습니다.");
             }
@@ -195,11 +224,19 @@
 
         function hostStartGame() {
             if (!isTeacher) return;
+            
+            if (isServerHost) {
+                executeMatchAndStart();
+            } else if (hostConn) {
+                // 선생님 단말기가 방장이 아닐 경우 방장에게 게임 시작 신호 전송
+                hostConn.send({ type: 'EXECUTE_START' });
+            }
+        }
 
-            let peerIds = Object.keys(membersMap);
-            if (peerIds.length === 0) return alert("접속자가 없습니다.");
+        function executeMatchAndStart() {
+            if (connectedClients.length === 0) return alert("접속자가 없습니다.");
 
-            let shuffled = [...peerIds].sort(() => Math.random() - 0.5);
+            let shuffled = [...connectedClients].sort(() => Math.random() - 0.5);
             let pairCount = 1;
 
             while (shuffled.length > 0) {
@@ -208,35 +245,21 @@
                     let p2 = shuffled.pop();
                     let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
 
-                    sendToPeer(p1, { type: 'START_GAME', oppAnonName: anonName, isAI: false });
-                    sendToPeer(p2, { type: 'START_GAME', oppAnonName: anonName, isAI: false });
+                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
+                    else startMyGame(anonName, false);
+
+                    if (p2.conn) p2.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
+                    else startMyGame(anonName, false);
 
                     pairCount++;
                 } else {
                     let p1 = shuffled.pop();
                     let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
 
-                    sendToPeer(p1, { type: 'START_GAME', oppAnonName: anonName, isAI: true });
+                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: true });
+                    else startMyGame(anonName, true);
                 }
             }
-        }
-
-        function sendToPeer(targetPeerId, msgObj) {
-            if (targetPeerId === peer.id) {
-                // 자기 자신
-                if (msgObj.type === 'START_GAME') startMyGame(msgObj.oppAnonName, msgObj.isAI);
-            } else {
-                let conn = activeConns.find(c => c.peer === targetPeerId);
-                if (conn && conn.open) {
-                    conn.send(msgObj);
-                }
-            }
-        }
-
-        function broadcast(msgObj) {
-            activeConns.forEach(conn => {
-                if (conn.open) conn.send(msgObj);
-            });
         }
 
         function startMyGame(oppAnonName, aiFlag) {
@@ -315,20 +338,30 @@
             document.getElementById('screen-game').style.display = 'none';
             document.getElementById('screen-result').style.display = 'block';
 
-            finalScoresMap[myName] = myScore;
-            broadcast({ type: 'SCORE', name: myName, score: myScore });
-            updateAndBroadcastRankings();
+            if (isServerHost) {
+                handleScoreSubmit(myName, myScore);
+            } else if (hostConn) {
+                hostConn.send({ type: 'SUBMIT_SCORE', name: myName, score: myScore });
+            }
         }
 
-        function updateAndBroadcastRankings() {
-            let list = [];
-            for (let name in finalScoresMap) {
-                list.push({ name: name, score: finalScoresMap[name] });
-            }
-            list.sort((a, b) => b.score - a.score);
+        function handleScoreSubmit(name, score) {
+            if (!isServerHost) return;
 
-            renderRankTable(list);
-            broadcast({ type: 'RANKINGS', rankings: list });
+            let existing = finalScores.find(s => s.name === name);
+            if (!existing) {
+                finalScores.push({ name: name, score: score });
+            }
+
+            finalScores.sort((a, b) => b.score - a.score);
+
+            renderRankTable(finalScores);
+
+            connectedClients.forEach(client => {
+                if (client.conn && client.conn.open) {
+                    client.conn.send({ type: 'FINAL_RANKINGS', rankings: finalScores });
+                }
+            });
         }
 
         function renderRankTable(rankings) {
