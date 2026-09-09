@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>윤리 교과 상호성 실시간 체험 게임</title>
+    <title>죄수의 딜레마</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { font-family: 'Noto Sans KR', sans-serif; text-align: center; background-color: #f0f4f8; padding: 20px; color: #333; }
@@ -25,23 +25,23 @@
 </head>
 <body>
 
-    <h2>🤝 상호성(Reciprocity) 윤리 체험 게임</h2>
+    <h2>🤝 죄수의 딜레마</h2>
 
     <!-- 1. 입장 화면 -->
     <div class="card-box" id="screen-login">
         <h3>게임 대기실 입장</h3>
-        <input type="text" id="room-id" placeholder="방 이름 (예: ethics101)" value="ethics101"><br>
+        <input type="text" id="room-id" placeholder="입장 코드 (예: 101, 윤리1반, A모둠)"><br>
         <input type="text" id="user-name" placeholder="본인 이름 입력 (예: 홍길동)"><br>
         <button class="btn-main" onclick="joinRoom()">대기실 입장하기</button>
     </div>
 
     <!-- 2. 대기실 화면 -->
     <div class="card-box" id="screen-lobby" style="display: none;">
-        <h3>⏳ 대기실</h3>
-        <p>선생님이 게임을 시작할 때까지 잠시 기다려 주세요.</p>
-        <p><b>현재 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
+        <h3>⏳ [<span id="display-room-id"></span>] 대기실</h3>
+        <p>같은 코드를 입력한 친구들이 들어올 때까지 기다려 주세요.</p>
+        <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
         <div id="host-controls" style="display: none; border-top: 1px solid #eee; padding-top: 15px;">
-            <p style="color:#d35400; font-size: 14px; font-weight: bold;">👑 귀하는 방장(선생님 역할)입니다.</p>
+            <p style="color:#d35400; font-size: 14px; font-weight: bold;">👑 귀하는 방장(가장 먼저 들어온 사람)입니다.</p>
             <button class="btn-start" onclick="hostStartGame()">🎮 전원 게임 시작 및 무작위 매칭</button>
         </div>
     </div>
@@ -55,7 +55,6 @@
             <div>상대: <span id="opp-score">0</span>점</div>
         </div>
 
-        <!-- 10초 타이머 -->
         <div class="timer-box" id="timer-box">생각할 시간: <span id="timer-sec">10</span>초</div>
         <div id="status-msg" style="margin-bottom:10px; font-weight:bold;">10초 동안 생각한 후 선택할 수 있습니다.</div>
 
@@ -78,40 +77,36 @@
 
     <script>
         let peer = null;
-        let conn = null; // 상대방과의 연결
+        let conn = null;
         let myName = "";
+        let currentRoomId = "";
         let isHost = false;
         
-        // 게임 상태 데이터
         let round = 1;
         let myScore = 0;
         let oppScore = 0;
         let myChoice = null;
         let oppChoice = null;
         let isAI = false;
-        let aiLastMove = 'cooperate'; // AI 팃포탯용 Memory
+        let aiLastMove = 'cooperate';
         
-        // 가짜 AI 이름 목록 (홀수일 때 학생이 눈치채지 못하도록 위장)
         const fakeNames = ["김민준", "이서연", "박도윤", "최지우", "정예준", "강수아"];
-
-        // 방장 관리용 데이터
-        let players = []; // { id, name, conn }
+        let players = [];
 
         function joinRoom() {
-            const room = document.getElementById('room-id').value.trim();
+            currentRoomId = document.getElementById('room-id').value.trim();
             myName = document.getElementById('user-name').value.trim();
-            if (!room || !myName) return alert("방 이름과 본인 이름을 모두 입력하세요.");
+            if (!currentRoomId || !myName) return alert("입장 코드와 본인 이름을 모두 입력해 주세요.");
 
-            // 1번 접속자를 방장(Host)으로 설정하는 단순 알고리즘
-            const hostId = room + "-HOST-MASTER";
+            document.getElementById('display-room-id').innerText = currentRoomId;
+
+            const hostId = "ROOM-" + currentRoomId.toUpperCase() + "-HOST";
             peer = new Peer();
 
             peer.on('open', (id) => {
-                // 방장 연결 시도
                 let hostConn = peer.connect(hostId);
                 
                 hostConn.on('open', () => {
-                    // 방장이 존재함 -> 일반 참가자로 진입
                     conn = hostConn;
                     document.getElementById('screen-login').style.display = 'none';
                     document.getElementById('screen-lobby').style.display = 'block';
@@ -121,7 +116,6 @@
 
                 setTimeout(() => {
                     if (!conn) {
-                        // 방장이 없어서 연결 실패 -> 내가 방장이 됨
                         peer.destroy();
                         peer = new Peer(hostId);
                         peer.on('open', () => {
@@ -131,7 +125,6 @@
                             document.getElementById('host-controls').style.display = 'block';
                             players.push({ id: hostId, name: myName, conn: null });
                             
-                            // 다른 참가자 연결 대기
                             peer.on('connection', (c) => {
                                 c.on('data', (data) => {
                                     if (data.type === 'JOIN') {
@@ -158,34 +151,27 @@
                 if (data.type === 'LOBBY_COUNT') {
                     document.getElementById('lobby-count').innerText = data.count;
                 } else if (data.type === 'START_GAME') {
-                    // 매칭 정보 수신
                     startMyGame(data.oppName, data.isAI);
                 }
             });
         }
 
-        // 방장이 [게임 시작]을 눌렀을 때 실행되는 매칭 로직
         function hostStartGame() {
             if (players.length < 1) return alert("참가자가 없습니다.");
 
-            // 1. 순서 섞기 (랜덤 매칭)
             let shuffled = [...players].sort(() => Math.random() - 0.5);
 
-            // 2. 2명씩 짝지어 매칭 전달 (홀수면 마지막 사람은 AI 배치)
             while (shuffled.length > 0) {
                 if (shuffled.length >= 2) {
                     let p1 = shuffled.pop();
                     let p2 = shuffled.pop();
 
-                    // P1에게 P2 정보 전달
                     if (p1.conn) p1.conn.send({ type: 'START_GAME', oppName: p2.name, isAI: false });
-                    else startMyGame(p2.name, false); // 방장 본인인 경우
+                    else startMyGame(p2.name, false);
 
-                    // P2에게 P1 정보 전달
                     if (p2.conn) p2.conn.send({ type: 'START_GAME', oppName: p1.name, isAI: false });
                     else startMyGame(p1.name, false);
                 } else {
-                    // 홀수 1명 남음 -> 위장 AI 배치
                     let p1 = shuffled.pop();
                     let randomFakeName = fakeNames[Math.floor(Math.random() * fakeNames.length)];
                     if (p1.conn) p1.conn.send({ type: 'START_GAME', oppName: randomFakeName, isAI: true });
@@ -203,7 +189,6 @@
             startRoundTimer();
         }
 
-        // 10초 타이머 로직
         function startRoundTimer() {
             let timeLeft = 10;
             document.getElementById('btn-c').disabled = true;
@@ -231,12 +216,10 @@
             document.getElementById('status-msg').innerText = "상대방의 선택을 기다리고 있습니다...";
 
             if (isAI) {
-                // AI 팃포탯 (첫 판은 협력, 이후 상대 이전 행동)
                 oppChoice = (round === 1) ? 'cooperate' : aiLastMove;
                 aiLastMove = choice;
                 setTimeout(calcResult, 1000);
             } else {
-                // 상대 플레이어가 있는 경우 (간이 통신 연출)
                 if(!oppChoice) oppChoice = (Math.random() > 0.5) ? 'cooperate' : 'betray'; 
                 setTimeout(calcResult, 1000);
             }
@@ -273,7 +256,6 @@
             document.getElementById('screen-game').style.display = 'none';
             document.getElementById('screen-result').style.display = 'block';
 
-            // 결과 순위표 생성
             let rankHTML = `
                 <table class="rank-table">
                     <tr><th>순위</th><th>이름</th><th>최종 점수</th></tr>
