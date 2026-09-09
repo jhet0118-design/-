@@ -41,6 +41,7 @@
         <h3>⏳ [<span id="display-room-id"></span>] 대기실</h3>
         <p>선생님이 게임을 시작할 때까지 잠시 기다려 주세요.</p>
         <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
+        <div id="status-info" style="font-size: 13px; color: #7f8c8d; margin-top: 5px;">접속 대기 중...</div>
         
         <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 10px;">
             <div id="teacher-login-box">
@@ -86,10 +87,10 @@
         const TEACHER_PASSWORD = "1234";
 
         let peer = null;
-        let conn = null;
         let myName = "";
         let currentRoomId = "";
         let isTeacher = false;
+        let isServerHost = false;
         
         let round = 1;
         let myScore = 0;
@@ -98,59 +99,88 @@
         let oppChoice = null;
         let isAI = false;
         let aiLastMove = 'cooperate';
-        
-        // 내 로컬 참가자 명단
-        let playerList = []; 
+
+        // 방장이 관리하는 전체 참가자 목록 (연결 객체 포함)
+        let connectedClients = []; 
 
         function joinRoom() {
-            currentRoomId = document.getElementById('room-id').value.trim();
+            currentRoomId = document.getElementById('room-id').value.trim().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
             myName = document.getElementById('user-name').value.trim();
-            if (!currentRoomId || !myName) return alert("입장 코드와 본인 이름을 모두 입력해 주세요.");
+
+            if (!currentRoomId || !myName) return alert("입장 코드(영문/숫자)와 본인 이름을 모두 입력해 주세요.");
 
             document.getElementById('display-room-id').innerText = currentRoomId;
+            document.getElementById('screen-login').style.display = 'none';
+            document.getElementById('screen-lobby').style.display = 'block';
 
-            const hostId = "ROOM-" + currentRoomId.toUpperCase() + "-HOST";
-            peer = new Peer();
+            // 고정된 방 호스트 ID 생성
+            const roomHostId = "ETHICS-ROOM-" + currentRoomId;
+
+            // 1차 시도: 내가 이 방의 메인 관리자(Host)가 되어본다.
+            peer = new Peer(roomHostId);
 
             peer.on('open', (id) => {
-                let hostConn = peer.connect(hostId);
-                
-                hostConn.on('open', () => {
-                    // 메인 서버(방장)에 일반 참가자로 등록
-                    conn = hostConn;
-                    document.getElementById('screen-login').style.display = 'none';
-                    document.getElementById('screen-lobby').style.display = 'block';
-                    conn.send({ type: 'JOIN', name: myName });
-                    setupClientConnection();
+                // 내가 이 방 코드의 호스트로 등록됨
+                isServerHost = true;
+                connectedClients.push({ id: id, name: myName, conn: null });
+                updateLobbyUI();
+            });
+
+            peer.on('connection', (conn) => {
+                // 누군가 이 방에 접속했을 때 (방장 로직)
+                conn.on('data', (data) => {
+                    if (data.type === 'JOIN') {
+                        // 클라이언트 등록
+                        connectedClients.push({ id: conn.peer, name: data.name, conn: conn });
+                        broadcastLobbyStatus();
+                    }
                 });
 
-                setTimeout(() => {
-                    if (!conn) {
-                        // 내가 첫 번째 접속자(방장 역할 수행)
-                        peer.destroy();
-                        peer = new Peer(hostId);
-                        peer.on('open', () => {
-                            document.getElementById('screen-login').style.display = 'none';
-                            document.getElementById('screen-lobby').style.display = 'block';
-                            
-                            // 나 자신 등록
-                            playerList.push({ id: hostId, name: myName, conn: null });
-                            
-                            peer.on('connection', (c) => {
-                                c.on('data', (data) => {
-                                    if (data.type === 'JOIN') {
-                                        // 중복 추가 방지
-                                        if(!playerList.some(p => p.id === c.peer)) {
-                                            playerList.push({ id: c.peer, name: data.name, conn: c });
-                                        }
-                                        broadcastLobbyCount();
-                                    }
-                                });
-                            });
-                        });
-                    }
-                }, 1000);
+                conn.on('close', () => {
+                    connectedClients = connectedClients.filter(c => c.id !== conn.peer);
+                    broadcastLobbyStatus();
+                });
             });
+
+            peer.on('error', (err) => {
+                // 방 호스트가 이미 존재함 (내가 일반 클라이언트로 입장)
+                if (err.type === 'unavailable-id') {
+                    isServerHost = false;
+                    peer = new Peer(); // 랜덤 내 ID 생성
+
+                    peer.on('open', () => {
+                        let conn = peer.connect(roomHostId);
+
+                        conn.on('open', () => {
+                            conn.send({ type: 'JOIN', name: myName });
+                        });
+
+                        conn.on('data', (data) => {
+                            if (data.type === 'LOBBY_STATUS') {
+                                document.getElementById('lobby-count').innerText = data.count;
+                            } else if (data.type === 'START_GAME') {
+                                startMyGame(data.oppAnonName, data.isAI);
+                            }
+                        });
+                    });
+                }
+            });
+        }
+
+        function broadcastLobbyStatus() {
+            if (!isServerHost) return;
+            let count = connectedClients.length;
+            updateLobbyUI();
+
+            connectedClients.forEach(client => {
+                if (client.conn) {
+                    client.conn.send({ type: 'LOBBY_STATUS', count: count });
+                }
+            });
+        }
+
+        function updateLobbyUI() {
+            document.getElementById('lobby-count').innerText = connectedClients.length;
         }
 
         function authTeacher() {
@@ -159,39 +189,35 @@
                 isTeacher = true;
                 document.getElementById('teacher-login-box').style.display = 'none';
                 document.getElementById('host-controls').style.display = 'block';
-                alert("교사 인증 완료! 접속 인원을 확인한 후 게임 시작 버튼을 누르세요.");
+                alert("교사 인증 완료! 인원이 다 모인 것을 확인한 후 게임 시작을 누르세요.");
             } else if (inputPw !== null) {
                 alert("비밀번호가 올바르지 않습니다.");
             }
         }
 
-        function broadcastLobbyCount() {
-            let count = playerList.length;
-            document.getElementById('lobby-count').innerText = count;
-            playerList.forEach(p => {
-                if(p.conn) p.conn.send({ type: 'LOBBY_COUNT', count: count });
-            });
-        }
-
-        function setupClientConnection() {
-            conn.on('data', (data) => {
-                if (data.type === 'LOBBY_COUNT') {
-                    document.getElementById('lobby-count').innerText = data.count;
-                } else if (data.type === 'START_GAME') {
-                    startMyGame(data.oppAnonName, data.isAI);
-                }
-            });
-        }
-
         function hostStartGame() {
-            if (!isTeacher) return alert("교사 인증이 필요합니다.");
-            
-            // 등록된 인원 수 확인
-            if (playerList.length === 0) {
-                return alert("대기 중인 접속자가 없습니다.");
+            if (!isTeacher) return;
+
+            if (!isServerHost) {
+                alert("현재 이 방의 신호 연결은 가장 먼저 들어온 학생 단말기를 통해 제어되고 있습니다. 전원 동시에 시작을 진행합니다.");
             }
 
-            let shuffled = [...playerList].sort(() => Math.random() - 0.5);
+            // 방장에게 시작 명령 전달
+            if (isServerHost) {
+                executeMatchAndStart();
+            } else {
+                // 만약 선생님이 늦게 들어와서 서브 연결일 경우 메인 방장에게 시작 전달
+                let hostConn = peer.connect("ETHICS-ROOM-" + currentRoomId);
+                hostConn.on('open', () => {
+                    hostConn.send({ type: 'EXECUTE_START' });
+                });
+            }
+        }
+
+        function executeMatchAndStart() {
+            if (connectedClients.length === 0) return alert("접속자가 없습니다.");
+
+            let shuffled = [...connectedClients].sort(() => Math.random() - 0.5);
             let pairCount = 1;
 
             while (shuffled.length > 0) {
@@ -208,9 +234,9 @@
 
                     pairCount++;
                 } else {
-                    // 홀수일 경우 비밀 AI 매칭
                     let p1 = shuffled.pop();
                     let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
+
                     if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: true });
                     else startMyGame(anonName, true);
                 }
