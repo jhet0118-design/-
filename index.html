@@ -22,6 +22,7 @@
         .rank-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         .rank-table th, .rank-table td { border: 1px solid #ddd; padding: 8px; text-align: center; }
         .rank-table th { background-color: #3498db; color: white; }
+        .my-row { background-color: #fff3cd; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -31,7 +32,7 @@
     <!-- 1. 입장 화면 -->
     <div class="card-box" id="screen-login">
         <h3>게임 대기실 입장</h3>
-        <input type="text" id="room-id" placeholder="입장 코드 (예: 101, 윤리1반, A모둠)"><br>
+        <input type="text" id="room-id" placeholder="입장 코드 (예: 101, 윤리1반)"><br>
         <input type="text" id="user-name" placeholder="본인 이름 입력 (예: 홍길동)"><br>
         <button class="btn-main" onclick="joinRoom()">대기실 입장하기</button>
     </div>
@@ -41,7 +42,6 @@
         <h3>⏳ [<span id="display-room-id"></span>] 대기실</h3>
         <p>선생님이 게임을 시작할 때까지 잠시 기다려 주세요.</p>
         <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
-        <div id="status-info" style="font-size: 13px; color: #7f8c8d; margin-top: 5px;">접속 대기 중...</div>
         
         <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 10px;">
             <div id="teacher-login-box">
@@ -77,16 +77,16 @@
 
     <!-- 4. 순위 및 결과 화면 -->
     <div class="card-box" id="screen-result" style="display: none;">
-        <h3>🏆 게임 결과 및 최종 순위</h3>
-        <div id="final-rank-box">
-            <p>결과 집계 중...</p>
-        </div>
+        <h3>🏆 전체 학생 최종 순위표</h3>
+        <p id="result-status" style="font-size:14px; color:#e67e22;">전체 학생의 결과를 집계하고 있습니다...</p>
+        <div id="final-rank-box"></div>
     </div>
 
     <script>
         const TEACHER_PASSWORD = "1234";
 
         let peer = null;
+        let hostConn = null;
         let myName = "";
         let currentRoomId = "";
         let isTeacher = false;
@@ -100,39 +100,35 @@
         let isAI = false;
         let aiLastMove = 'cooperate';
 
-        // 방장이 관리하는 전체 참가자 목록 (연결 객체 포함)
         let connectedClients = []; 
+        let finalScores = []; 
 
         function joinRoom() {
             currentRoomId = document.getElementById('room-id').value.trim().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
             myName = document.getElementById('user-name').value.trim();
 
-            if (!currentRoomId || !myName) return alert("입장 코드(영문/숫자)와 본인 이름을 모두 입력해 주세요.");
+            if (!currentRoomId || !myName) return alert("입장 코드와 본인 이름을 모두 입력해 주세요.");
 
             document.getElementById('display-room-id').innerText = currentRoomId;
             document.getElementById('screen-login').style.display = 'none';
             document.getElementById('screen-lobby').style.display = 'block';
 
-            // 고정된 방 호스트 ID 생성
             const roomHostId = "ETHICS-ROOM-" + currentRoomId;
-
-            // 1차 시도: 내가 이 방의 메인 관리자(Host)가 되어본다.
             peer = new Peer(roomHostId);
 
             peer.on('open', (id) => {
-                // 내가 이 방 코드의 호스트로 등록됨
                 isServerHost = true;
                 connectedClients.push({ id: id, name: myName, conn: null });
                 updateLobbyUI();
             });
 
             peer.on('connection', (conn) => {
-                // 누군가 이 방에 접속했을 때 (방장 로직)
                 conn.on('data', (data) => {
                     if (data.type === 'JOIN') {
-                        // 클라이언트 등록
                         connectedClients.push({ id: conn.peer, name: data.name, conn: conn });
                         broadcastLobbyStatus();
+                    } else if (data.type === 'SUBMIT_SCORE') {
+                        handleScoreSubmit(data.name, data.score);
                     }
                 });
 
@@ -143,23 +139,24 @@
             });
 
             peer.on('error', (err) => {
-                // 방 호스트가 이미 존재함 (내가 일반 클라이언트로 입장)
                 if (err.type === 'unavailable-id') {
                     isServerHost = false;
-                    peer = new Peer(); // 랜덤 내 ID 생성
+                    peer = new Peer();
 
                     peer.on('open', () => {
-                        let conn = peer.connect(roomHostId);
+                        hostConn = peer.connect(roomHostId);
 
-                        conn.on('open', () => {
-                            conn.send({ type: 'JOIN', name: myName });
+                        hostConn.on('open', () => {
+                            hostConn.send({ type: 'JOIN', name: myName });
                         });
 
-                        conn.on('data', (data) => {
+                        hostConn.on('data', (data) => {
                             if (data.type === 'LOBBY_STATUS') {
                                 document.getElementById('lobby-count').innerText = data.count;
                             } else if (data.type === 'START_GAME') {
                                 startMyGame(data.oppAnonName, data.isAI);
+                            } else if (data.type === 'FINAL_RANKINGS') {
+                                renderRankTable(data.rankings);
                             }
                         });
                     });
@@ -189,7 +186,7 @@
                 isTeacher = true;
                 document.getElementById('teacher-login-box').style.display = 'none';
                 document.getElementById('host-controls').style.display = 'block';
-                alert("교사 인증 완료! 인원이 다 모인 것을 확인한 후 게임 시작을 누르세요.");
+                alert("교사 인증 완료! 인원이 모두 모이면 게임 시작 버튼을 누르세요.");
             } else if (inputPw !== null) {
                 alert("비밀번호가 올바르지 않습니다.");
             }
@@ -197,20 +194,10 @@
 
         function hostStartGame() {
             if (!isTeacher) return;
-
-            if (!isServerHost) {
-                alert("현재 이 방의 신호 연결은 가장 먼저 들어온 학생 단말기를 통해 제어되고 있습니다. 전원 동시에 시작을 진행합니다.");
-            }
-
-            // 방장에게 시작 명령 전달
             if (isServerHost) {
                 executeMatchAndStart();
-            } else {
-                // 만약 선생님이 늦게 들어와서 서브 연결일 경우 메인 방장에게 시작 전달
-                let hostConn = peer.connect("ETHICS-ROOM-" + currentRoomId);
-                hostConn.on('open', () => {
-                    hostConn.send({ type: 'EXECUTE_START' });
-                });
+            } else if (hostConn) {
+                hostConn.send({ type: 'EXECUTE_START' });
             }
         }
 
@@ -311,25 +298,73 @@
                 document.getElementById('timer-box').innerHTML = '생각할 시간: <span id="timer-sec">10</span>초';
                 startRoundTimer();
             } else {
-                showFinalResults();
+                finishGameAndSendScore();
             }
         }
 
-        function showFinalResults() {
+        function finishGameAndSendScore() {
             document.getElementById('screen-game').style.display = 'none';
             document.getElementById('screen-result').style.display = 'block';
 
-            let rankHTML = `
+            if (isServerHost) {
+                handleScoreSubmit(myName, myScore);
+            } else if (hostConn) {
+                hostConn.send({ type: 'SUBMIT_SCORE', name: myName, score: myScore });
+            }
+        }
+
+        function handleScoreSubmit(name, score) {
+            if (!isServerHost) return;
+
+            finalScores.push({ name: name, score: score });
+
+            // 점수 기준 내림차순 정렬
+            finalScores.sort((a, b) => b.score - a.score);
+
+            // 방장 화면 업데이트
+            renderRankTable(finalScores);
+
+            // 전체 참가자들에게 최종 순위표 브로드캐스트
+            connectedClients.forEach(client => {
+                if (client.conn) {
+                    client.conn.send({ type: 'FINAL_RANKINGS', rankings: finalScores });
+                }
+            });
+        }
+
+        function renderRankTable(rankings) {
+            document.getElementById('result-status').style.display = 'none';
+
+            let tableHTML = `
                 <table class="rank-table">
-                    <tr><th>순위</th><th>이름</th><th>최종 점수</th></tr>
-                    <tr style="background-color:#fff3cd;"><td>1위 (우승)</td><td>${myName}</td><td>${myScore}점</td></tr>
-                    <tr><td>2위</td><td>${document.getElementById('opp-name').innerText}</td><td>${oppScore}점</td></tr>
-                </table>
-                <p style="margin-top:20px; font-size:14px; color:#555;">
-                    💡 <b>윤리적 시사점:</b> 상대방과 '상호 신뢰'를 유지했을 때와 '배신'했을 때의 점수 차이를 확인해 보세요.
+                    <tr>
+                        <th>순위</th>
+                        <th>이름</th>
+                        <th>최종 점수</th>
+                    </tr>
+            `;
+
+            rankings.forEach((item, index) => {
+                let rank = index + 1;
+                let isMe = (item.name === myName) ? 'class="my-row"' : '';
+                tableHTML += `
+                    <tr ${isMe}>
+                        <td>${rank}위</td>
+                        <td>${item.name} ${item.name === myName ? '(나)' : ''}</td>
+                        <td>${item.score}점</td>
+                    </tr>
+                `;
+            });
+
+            tableHTML += `</table>
+                <p style="margin-top:20px; font-size:14px; color:#555; text-align:left;">
+                    💡 <b>윤리 수업 토론 주제:</b><br>
+                    • 상위권에 오른 사람들은 어떤 전략(신뢰 vs 배신)을 주로 사용했나요?<br>
+                    • 모두가 '신뢰'를 선택했을 때와 일부가 '배신'을 선택했을 때 전체 학급의 총점은 어떻게 달라지는지 비교해 봅시다.
                 </p>
             `;
-            document.getElementById('final-rank-box').innerHTML = rankHTML;
+
+            document.getElementById('final-rank-box').innerHTML = tableHTML;
         }
     </script>
 </body>
