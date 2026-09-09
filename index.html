@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>죄수의 딜레마</title>
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <!-- 방화벽에 강한 실시간 WebSocket 라이브러리 -->
+    <script src="https://cdn.jsdelivr.net/npm/pubnub@7.2.2/dist/web/pubnub.min.js"></script>
     <style>
         body { font-family: 'Noto Sans KR', sans-serif; text-align: center; background-color: #f0f4f8; padding: 20px; color: #333; }
         .card-box { background: white; padding: 25px; border-radius: 12px; max-width: 500px; margin: 0 auto 20px auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
@@ -41,7 +42,7 @@
     <div class="card-box" id="screen-lobby" style="display: none;">
         <h3>⏳ [<span id="display-room-id"></span>] 대기실</h3>
         <p>선생님이 게임을 시작할 때까지 잠시 기다려 주세요.</p>
-        <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
+        <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">0</span>명</b></p>
         
         <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 10px;">
             <div id="teacher-login-box">
@@ -85,13 +86,15 @@
     <script>
         const TEACHER_PASSWORD = "1234";
 
-        let peer = null;
-        let hostConn = null;
+        let pubnub = null;
+        let myUuid = 'user_' + Math.random().toString(36).substr(2, 9);
         let myName = "";
         let currentRoomId = "";
         let isTeacher = false;
-        let isServerHost = false;
-        
+
+        let roomPlayers = {}; 
+        let finalScores = [];
+
         let round = 1;
         let myScore = 0;
         let oppScore = 0;
@@ -100,11 +103,8 @@
         let isAI = false;
         let aiLastMove = 'cooperate';
 
-        let connectedClients = []; 
-        let finalScores = []; 
-
         function joinRoom() {
-            currentRoomId = document.getElementById('room-id').value.trim().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+            currentRoomId = document.getElementById('room-id').value.trim().toUpperCase();
             myName = document.getElementById('user-name').value.trim();
 
             if (!currentRoomId || !myName) return alert("입장 코드와 본인 이름을 모두 입력해 주세요.");
@@ -113,71 +113,75 @@
             document.getElementById('screen-login').style.display = 'none';
             document.getElementById('screen-lobby').style.display = 'block';
 
-            const roomHostId = "ETHICS-ROOM-" + currentRoomId;
-            peer = new Peer(roomHostId);
-
-            peer.on('open', (id) => {
-                isServerHost = true;
-                connectedClients.push({ id: id, name: myName, conn: null });
-                updateLobbyUI();
+            // 회원가입 없이 즉시 사용 가능한 데모 신호망 사용
+            pubnub = new PubNub({
+                publishKey: 'pub-c-8d1ef325-1327-464d-b0ad-e771d50c9f13',
+                subscribeKey: 'sub-c-112348c3-4d40-4286-9051-7e8c3b772b22',
+                userId: myUuid
             });
 
-            peer.on('connection', (conn) => {
-                conn.on('data', (data) => {
-                    if (data.type === 'JOIN') {
-                        connectedClients.push({ id: conn.peer, name: data.name, conn: conn });
-                        broadcastLobbyStatus();
-                    } else if (data.type === 'SUBMIT_SCORE') {
-                        handleScoreSubmit(data.name, data.score);
+            const channelName = "ROOM_" + currentRoomId;
+
+            pubnub.subscribe({
+                channels: [channelName],
+                withPresence: true
+            });
+
+            pubnub.addListener({
+                message: function(m) {
+                    let msg = m.message;
+                    
+                    if (msg.type === 'PING_JOIN') {
+                        // 새로 들어온 사람에게 나도 접속해 있다고 응답
+                        sendMsg({ type: 'PONG_HERE', name: myName, uuid: myUuid });
+                        roomPlayers[msg.uuid] = msg.name;
+                        updateLobbyCount();
+                    } 
+                    else if (msg.type === 'PONG_HERE') {
+                        roomPlayers[msg.uuid] = msg.name;
+                        updateLobbyCount();
                     }
-                });
-
-                conn.on('close', () => {
-                    connectedClients = connectedClients.filter(c => c.id !== conn.peer);
-                    broadcastLobbyStatus();
-                });
+                    else if (msg.type === 'START_GAME') {
+                        if (msg.targetUuid === myUuid) {
+                            startMyGame(msg.oppAnonName, msg.isAI);
+                        }
+                    }
+                    else if (msg.type === 'SUBMIT_SCORE') {
+                        if (isTeacher) {
+                            collectAndBroadcastScores(msg.name, msg.score);
+                        }
+                    }
+                    else if (msg.type === 'FINAL_RANKINGS') {
+                        renderRankTable(msg.rankings);
+                    }
+                },
+                presence: function(p) {
+                    if (p.action === 'join') {
+                        sendMsg({ type: 'PING_JOIN', name: myName, uuid: myUuid });
+                    } else if (p.action === 'leave' || p.action === 'timeout') {
+                        delete roomPlayers[p.uuid];
+                        updateLobbyCount();
+                    }
+                }
             });
 
-            peer.on('error', (err) => {
-                if (err.type === 'unavailable-id') {
-                    isServerHost = false;
-                    peer = new Peer();
+            // 접속 시작 알림
+            setTimeout(() => {
+                roomPlayers[myUuid] = myName;
+                sendMsg({ type: 'PING_JOIN', name: myName, uuid: myUuid });
+            }, 500);
+        }
 
-                    peer.on('open', () => {
-                        hostConn = peer.connect(roomHostId);
-
-                        hostConn.on('open', () => {
-                            hostConn.send({ type: 'JOIN', name: myName });
-                        });
-
-                        hostConn.on('data', (data) => {
-                            if (data.type === 'LOBBY_STATUS') {
-                                document.getElementById('lobby-count').innerText = data.count;
-                            } else if (data.type === 'START_GAME') {
-                                startMyGame(data.oppAnonName, data.isAI);
-                            } else if (data.type === 'FINAL_RANKINGS') {
-                                renderRankTable(data.rankings);
-                            }
-                        });
-                    });
-                }
+        function sendMsg(msgObj) {
+            pubnub.publish({
+                channel: "ROOM_" + currentRoomId,
+                message: msgObj
             });
         }
 
-        function broadcastLobbyStatus() {
-            if (!isServerHost) return;
-            let count = connectedClients.length;
-            updateLobbyUI();
-
-            connectedClients.forEach(client => {
-                if (client.conn) {
-                    client.conn.send({ type: 'LOBBY_STATUS', count: count });
-                }
-            });
-        }
-
-        function updateLobbyUI() {
-            document.getElementById('lobby-count').innerText = connectedClients.length;
+        function updateLobbyCount() {
+            let count = Object.keys(roomPlayers).length;
+            document.getElementById('lobby-count').innerText = count;
         }
 
         function authTeacher() {
@@ -186,7 +190,7 @@
                 isTeacher = true;
                 document.getElementById('teacher-login-box').style.display = 'none';
                 document.getElementById('host-controls').style.display = 'block';
-                alert("교사 인증 완료! 인원이 모두 모이면 게임 시작 버튼을 누르세요.");
+                alert("교사 인증 완료! 인원이 모두 모이면 아래 [게임 시작] 버튼을 누르세요.");
             } else if (inputPw !== null) {
                 alert("비밀번호가 올바르지 않습니다.");
             }
@@ -194,17 +198,11 @@
 
         function hostStartGame() {
             if (!isTeacher) return;
-            if (isServerHost) {
-                executeMatchAndStart();
-            } else if (hostConn) {
-                hostConn.send({ type: 'EXECUTE_START' });
-            }
-        }
 
-        function executeMatchAndStart() {
-            if (connectedClients.length === 0) return alert("접속자가 없습니다.");
+            let playerUuids = Object.keys(roomPlayers);
+            if (playerUuids.length === 0) return alert("접속자가 없습니다.");
 
-            let shuffled = [...connectedClients].sort(() => Math.random() - 0.5);
+            let shuffled = [...playerUuids].sort(() => Math.random() - 0.5);
             let pairCount = 1;
 
             while (shuffled.length > 0) {
@@ -213,19 +211,15 @@
                     let p2 = shuffled.pop();
                     let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
 
-                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
-                    else startMyGame(anonName, false);
-
-                    if (p2.conn) p2.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
-                    else startMyGame(anonName, false);
+                    sendMsg({ type: 'START_GAME', targetUuid: p1, oppAnonName: anonName, isAI: false });
+                    sendMsg({ type: 'START_GAME', targetUuid: p2, oppAnonName: anonName, isAI: false });
 
                     pairCount++;
                 } else {
                     let p1 = shuffled.pop();
                     let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
 
-                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: true });
-                    else startMyGame(anonName, true);
+                    sendMsg({ type: 'START_GAME', targetUuid: p1, oppAnonName: anonName, isAI: true });
                 }
             }
         }
@@ -306,30 +300,18 @@
             document.getElementById('screen-game').style.display = 'none';
             document.getElementById('screen-result').style.display = 'block';
 
-            if (isServerHost) {
-                handleScoreSubmit(myName, myScore);
-            } else if (hostConn) {
-                hostConn.send({ type: 'SUBMIT_SCORE', name: myName, score: myScore });
-            }
+            sendMsg({ type: 'SUBMIT_SCORE', name: myName, score: myScore });
         }
 
-        function handleScoreSubmit(name, score) {
-            if (!isServerHost) return;
+        function collectAndBroadcastScores(name, score) {
+            let existing = finalScores.find(s => s.name === name);
+            if (!existing) {
+                finalScores.push({ name: name, score: score });
+            }
 
-            finalScores.push({ name: name, score: score });
-
-            // 점수 기준 내림차순 정렬
             finalScores.sort((a, b) => b.score - a.score);
 
-            // 방장 화면 업데이트
-            renderRankTable(finalScores);
-
-            // 전체 참가자들에게 최종 순위표 브로드캐스트
-            connectedClients.forEach(client => {
-                if (client.conn) {
-                    client.conn.send({ type: 'FINAL_RANKINGS', rankings: finalScores });
-                }
-            });
+            sendMsg({ type: 'FINAL_RANKINGS', rankings: finalScores });
         }
 
         function renderRankTable(rankings) {
