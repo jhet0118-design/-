@@ -12,6 +12,7 @@
         button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
         .btn-main { background-color: #3498db; color: white; width: 85%; }
         .btn-start { background-color: #e67e22; color: white; width: 85%; margin-top: 15px; font-size: 18px; }
+        .btn-teacher { background-color: #2c3e50; color: white; padding: 6px 12px; font-size: 12px; margin-top: 15px; }
         .btn-cooperate { background-color: #2ecc71; color: white; width: 48%; padding: 15px; font-size: 18px; }
         .btn-betray { background-color: #e74c3c; color: white; width: 48%; padding: 15px; font-size: 18px; }
         button:disabled { background-color: #bdc3c7 !important; cursor: not-allowed; }
@@ -38,17 +39,25 @@
     <!-- 2. 대기실 화면 -->
     <div class="card-box" id="screen-lobby" style="display: none;">
         <h3>⏳ [<span id="display-room-id"></span>] 대기실</h3>
-        <p>같은 코드를 입력한 친구들이 들어올 때까지 기다려 주세요.</p>
+        <p>선생님이 게임을 시작할 때까지 기다려 주세요.</p>
         <p><b>현재 방 접속자 수: <span id="lobby-count" style="color:#2980b9;">1</span>명</b></p>
-        <div id="host-controls" style="display: none; border-top: 1px solid #eee; padding-top: 15px;">
-            <p style="color:#d35400; font-size: 14px; font-weight: bold;">👑 귀하는 방장(가장 먼저 들어온 사람)입니다.</p>
-            <button class="btn-start" onclick="hostStartGame()">🎮 전원 게임 시작 및 무작위 매칭</button>
+        
+        <!-- 교사 전용 인증 버튼 및 제어판 -->
+        <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 10px;">
+            <div id="teacher-login-box">
+                <button class="btn-teacher" onclick="authTeacher()">🔑 교사 권한 인증 (선생님 전용)</button>
+            </div>
+            <div id="host-controls" style="display: none;">
+                <p style="color:#d35400; font-size: 14px; font-weight: bold;">👑 교사 권한으로 인증되었습니다.</p>
+                <button class="btn-start" onclick="hostStartGame()">🎮 전원 게임 시작 및 익명 무작위 매칭</button>
+            </div>
         </div>
     </div>
 
     <!-- 3. 게임 화면 -->
     <div class="card-box" id="screen-game" style="display: none;">
-        <p style="margin: 0; color: #7f8c8d;">상대방: <b id="opp-name" style="color:#2980b9;">-</b></p>
+        <!-- 익명 처리된 상대방 표시 -->
+        <p style="margin: 0; color: #7f8c8d;">상대방: <b id="opp-name" style="color:#2980b9;">익명의 플레이어</b></p>
         <div class="score-board">
             <div>나: <span id="my-score">0</span>점</div>
             <div>라운드: <span id="round">1</span> / 10</div>
@@ -76,6 +85,9 @@
     </div>
 
     <script>
+        // 🔑 교사 전용 비밀번호 (필요시 이 부분을 원하는 비밀번호로 수정하세요!)
+        const TEACHER_PASSWORD = "1234";
+
         let peer = null;
         let conn = null;
         let myName = "";
@@ -90,7 +102,6 @@
         let isAI = false;
         let aiLastMove = 'cooperate';
         
-        const fakeNames = ["김민준", "이서연", "박도윤", "최지우", "정예준", "강수아"];
         let players = [];
 
         function joinRoom() {
@@ -119,10 +130,9 @@
                         peer.destroy();
                         peer = new Peer(hostId);
                         peer.on('open', () => {
-                            isHost = true;
+                            // 방 기반 생성 (기본은 대기 상태)
                             document.getElementById('screen-login').style.display = 'none';
                             document.getElementById('screen-lobby').style.display = 'block';
-                            document.getElementById('host-controls').style.display = 'block';
                             players.push({ id: hostId, name: myName, conn: null });
                             
                             peer.on('connection', (c) => {
@@ -139,6 +149,19 @@
             });
         }
 
+        // 교사 인증 로직
+        function authTeacher() {
+            let inputPw = prompt("교사 인증 비밀번호를 입력하세요:");
+            if (inputPw === TEACHER_PASSWORD) {
+                isHost = true;
+                document.getElementById('teacher-login-box').style.display = 'none';
+                document.getElementById('host-controls').style.display = 'block';
+                alert("교사 인증 완료! 이제 게임 시작 버튼을 누르실 수 있습니다.");
+            } else if (inputPw !== null) {
+                alert("비밀번호가 올바르지 않습니다.");
+            }
+        }
+
         function broadcastLobbyCount() {
             document.getElementById('lobby-count').innerText = players.length;
             players.forEach(p => {
@@ -151,40 +174,47 @@
                 if (data.type === 'LOBBY_COUNT') {
                     document.getElementById('lobby-count').innerText = data.count;
                 } else if (data.type === 'START_GAME') {
-                    startMyGame(data.oppName, data.isAI);
+                    startMyGame(data.oppAnonName, data.isAI);
                 }
             });
         }
 
+        // 방장(교사)이 게임을 시작할 때 실행되는 무작위 익명 매칭 로직
         function hostStartGame() {
+            if (!isHost) return alert("교사 인증이 필요합니다.");
             if (players.length < 1) return alert("참가자가 없습니다.");
 
             let shuffled = [...players].sort(() => Math.random() - 0.5);
+            let pairCount = 1;
 
             while (shuffled.length > 0) {
                 if (shuffled.length >= 2) {
                     let p1 = shuffled.pop();
                     let p2 = shuffled.pop();
+                    let anonName = "참가자 " + String.fromCharCode(64 + pairCount); // 참가자 A, B, C ...
 
-                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppName: p2.name, isAI: false });
-                    else startMyGame(p2.name, false);
+                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
+                    else startMyGame(anonName, false);
 
-                    if (p2.conn) p2.conn.send({ type: 'START_GAME', oppName: p1.name, isAI: false });
-                    else startMyGame(p1.name, false);
+                    if (p2.conn) p2.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: false });
+                    else startMyGame(anonName, false);
+
+                    pairCount++;
                 } else {
+                    // 홀수일 경우 비밀 AI 매칭 (익명 이름 부여)
                     let p1 = shuffled.pop();
-                    let randomFakeName = fakeNames[Math.floor(Math.random() * fakeNames.length)];
-                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppName: randomFakeName, isAI: true });
-                    else startMyGame(randomFakeName, true);
+                    let anonName = "참가자 " + String.fromCharCode(64 + pairCount);
+                    if (p1.conn) p1.conn.send({ type: 'START_GAME', oppAnonName: anonName, isAI: true });
+                    else startMyGame(anonName, true);
                 }
             }
         }
 
-        function startMyGame(oppName, aiFlag) {
+        function startMyGame(oppAnonName, aiFlag) {
             isAI = aiFlag;
             document.getElementById('screen-lobby').style.display = 'none';
             document.getElementById('screen-game').style.display = 'block';
-            document.getElementById('opp-name').innerText = oppName;
+            document.getElementById('opp-name').innerText = oppAnonName;
 
             startRoundTimer();
         }
